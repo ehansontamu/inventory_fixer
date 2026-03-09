@@ -120,22 +120,44 @@ def process_closeout_inventory():
         if str(item.get("Closeout", "")).upper() != "Y":
             continue
 
-        try: qty = int(item.get("Qty", 0))
-        except: qty = 0
-        try: bc9 = int(item.get("bc_status9", 0))
-        except: bc9 = 0
-        try: bc7 = int(item.get("bc_status7", 0))
-        except: bc7 = 0
+        try:
+            qty = int(item.get("Qty", 0))
+        except:
+            qty = 0
 
-        final_qty = qty - bc9 - bc7
+        try:
+            bc9 = int(item.get("bc_status9", 0))
+        except:
+            bc9 = 0
+
+        try:
+            bc7 = int(item.get("bc_status7", 0))
+        except:
+            bc7 = 0
+
+        try:
+            qty_on_po = int(item.get("quantityOnPurchaseOrder", 0))
+        except:
+            qty_on_po = 0
+
+        final_qty = qty - bc9 - bc7 + qty_on_po
         if final_qty < 0:
             final_qty = 0
 
-        print(f"→ SKU={sku}: Qty={qty}, bc_status9={bc9}, bc_status7={bc7} → final={final_qty}")
+        print(
+            f"→ SKU={sku}: Qty={qty}, bc_status9={bc9}, bc_status7={bc7}, "
+            f"quantityOnPurchaseOrder={qty_on_po} → final={final_qty}"
+        )
 
         variant_id, product_id = find_variant_and_product_by_sku(sku)
         if not variant_id or not product_id:
-            toggle_list.append({"sku": sku, "product_id": None, "mode": None, "toggled": False, "reason": "not found"})
+            toggle_list.append({
+                "sku": sku,
+                "product_id": None,
+                "mode": None,
+                "toggled": False,
+                "reason": "not found"
+            })
             continue
 
         if product_id not in product_variants_map:
@@ -148,15 +170,35 @@ def process_closeout_inventory():
             if product_id not in toggled_products:
                 ok = toggle_product_tracking(product_id, desired_mode)
                 toggled_products[product_id] = desired_mode
-                toggle_list.append({"sku": sku, "product_id": product_id, "mode": desired_mode, "toggled": ok, "reason": None if ok else "toggle failed"})
-            adjustment_items.append({"location_id": BC_LOCATION_ID, "variant_id": variant_id, "quantity": final_qty})
+                toggle_list.append({
+                    "sku": sku,
+                    "product_id": product_id,
+                    "mode": desired_mode,
+                    "toggled": ok,
+                    "reason": None if ok else "toggle failed"
+                })
+            adjustment_items.append({
+                "location_id": BC_LOCATION_ID,
+                "variant_id": variant_id,
+                "quantity": final_qty
+            })
         else:
             desired_mode = "product"
             if product_id not in toggled_products:
                 ok = toggle_product_tracking(product_id, desired_mode)
                 toggled_products[product_id] = desired_mode
-                toggle_list.append({"sku": sku, "product_id": product_id, "mode": desired_mode, "toggled": ok, "reason": None if ok else "toggle failed"})
-            adjustment_items.append({"location_id": BC_LOCATION_ID, "sku": sku, "quantity": final_qty})
+                toggle_list.append({
+                    "sku": sku,
+                    "product_id": product_id,
+                    "mode": desired_mode,
+                    "toggled": ok,
+                    "reason": None if ok else "toggle failed"
+                })
+            adjustment_items.append({
+                "location_id": BC_LOCATION_ID,
+                "sku": sku,
+                "quantity": final_qty
+            })
 
     write_json_file(OUTPUT_ADJUST_JSON, {"reason": ADJUSTMENT_REASON, "items": adjustment_items})
     write_json_file(OUTPUT_TOGGLE_JSON, toggle_list)
