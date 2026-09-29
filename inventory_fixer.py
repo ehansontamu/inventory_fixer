@@ -29,6 +29,7 @@ BC_HEADERS         = {
 
 BC_LOCATION_ID     = int(_env("BC_LOCATION_ID", default="1", required=False))
 ADJUSTMENT_REASON  = _env("ADJUSTMENT_REASON", default="Closeout inventory sync", required=False)
+DISCONTINUED_CATEGORY_IDS = {49, 50, 51, 52}
 
 HTTP_TIMEOUT       = (5, 30)  # (connect, read)
 
@@ -81,6 +82,33 @@ def toggle_product_tracking(product_id, mode):
         print(f"   [ERROR] Toggle tracking failed (product_id={product_id}, mode={mode}): {e}")
         return False
 
+def disable_discontinued_product(product_id):
+    url = f"{BC_BASE_URL}/{BC_STORE_ID}/v3/catalog/products/{product_id}"
+    payload = {
+        "availability": "disabled",
+        "inventory_tracking": "none"
+    }
+    try:
+        resp = requests.put(url, headers=BC_HEADERS, json=payload, timeout=HTTP_TIMEOUT)
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"   [ERROR] Failed to disable discontinued product_id={product_id}: {e}")
+        return False
+
+def is_in_discontinued_category(item):
+    category_ids = item.get("BigCommerceCategoryIds", [])
+    if not isinstance(category_ids, (list, tuple, set)):
+        category_ids = [category_ids]
+
+    for category_id in category_ids:
+        try:
+            if int(category_id) in DISCONTINUED_CATEGORY_IDS:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
 def write_json_file(path, data):
     try:
         with open(path, "w", encoding="utf-8") as f:
@@ -112,10 +140,49 @@ def process_closeout_inventory():
     adjustment_items = []
     product_variants_map = {}
     toggled_products = {}
+    disabled_products = set()
+
+    # Discontinued-category membership takes precedence over closeout inventory
+    # updates. Disable these products first so another SKU for the same product
+    # cannot turn tracking back on later in this run.
+    for item in data:
+        sku = (item.get("sku") or "").strip()
+        if not sku or not is_in_discontinued_category(item):
+            continue
+
+        print(f"-> SKU={sku}: discontinued category -> disabling purchases and inventory tracking")
+
+        variant_id, product_id = find_variant_and_product_by_sku(sku)
+        if not variant_id or not product_id:
+            toggle_list.append({
+                "sku": sku,
+                "product_id": None,
+                "mode": "none",
+                "availability": "disabled",
+                "toggled": False,
+                "reason": "not found"
+            })
+            continue
+
+        if product_id in disabled_products:
+            continue
+
+        ok = disable_discontinued_product(product_id)
+        disabled_products.add(product_id)
+        toggle_list.append({
+            "sku": sku,
+            "product_id": product_id,
+            "mode": "none",
+            "availability": "disabled",
+            "toggled": ok,
+            "reason": None if ok else "disable failed"
+        })
 
     for item in data:
         sku = (item.get("sku") or "").strip()
         if not sku:
+            continue
+        if is_in_discontinued_category(item):
             continue
         if str(item.get("Closeout", "")).upper() != "Y":
             continue
@@ -145,7 +212,7 @@ def process_closeout_inventory():
             final_qty = 0
 
         print(
-            f"→ SKU={sku}: Qty={qty}, bc_status9={bc9}, bc_status7={bc7}, "
+            f"-> SKU={sku}: Qty={qty}, bc_status9={bc9}, bc_status7={bc7}, "
             f"quantityOnPurchaseOrder={qty_on_po} → final={final_qty}"
         )
 
@@ -158,6 +225,10 @@ def process_closeout_inventory():
                 "toggled": False,
                 "reason": "not found"
             })
+            continue
+
+        if product_id in disabled_products:
+            print(f"   [INFO] Skipping inventory adjustment for disabled product_id={product_id}.")
             continue
 
         if product_id not in product_variants_map:
